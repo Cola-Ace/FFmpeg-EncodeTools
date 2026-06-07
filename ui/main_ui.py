@@ -20,6 +20,7 @@ from ui.other.path import DropEdit
 from ui.theme import dialog_card_style, dialog_style, polish_theme_widgets, valid_text_color
 from utils import load_cfg, save_cfg
 
+# 版本号
 CURRENT_VERSION = "v0.9.2-pre"
 
 
