@@ -41,7 +41,7 @@
 
 ### 6. VapourSynth 压制
 - 支持加载 VapourSynth 脚本（.vpy）。
-- 将 vspipe.exe 输出的 Y4M 原始视频流传输给 x265/x264 编码器或 FFmpeg。
+- 将 VSpipe 输出的 Y4M 原始视频流传输给 x265/x264 编码器或 FFmpeg。
 - 压制过程不需要生成大容量中间临时视频文件，节省硬盘空间。
 
 ### 7. 任务队列
