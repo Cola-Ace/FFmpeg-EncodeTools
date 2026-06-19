@@ -139,7 +139,7 @@ class CodeBox(QPlainTextEdit):
         self.bar.setGeometry(QRect(cr.left(), cr.top(), self.line_bar_w(), cr.height()))
 
     def line_bar_draw(self, event) -> None:
-        """绘制行号栏内容（行号数字）"""
+        """行号栏内容（行号数字）"""
         p = QPainter(self.bar)
         p.fillRect(event.rect(), QColor(DARK_PANEL))
 

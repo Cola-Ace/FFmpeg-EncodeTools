@@ -309,7 +309,8 @@ class Win(FramelessWindow):
         """单任务执行完成回调"""
         self.run_btn.setEnabled(True)
         self.run_btn.setText("执行当前任务")
-        self.post_task(is_q=False)
+        if getattr(self._runner, "ok", False):
+            self.post_task(is_q=False)
 
     def on_all_done(self) -> None:
         """队列全部完成回调"""

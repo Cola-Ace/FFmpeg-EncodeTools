@@ -93,7 +93,7 @@ def clean_subs(
     split_n: int | None = None,
     out_dir: str | None = None,
     single: bool = True,
-) -> None:
+) -> bool:
     """清洗字幕文件（ASS/SRT），支持等分导出
 
     Args:
@@ -110,10 +110,10 @@ def clean_subs(
         lines = _read_srt(str(in_path))
     else:
         warn(f"不支持的字幕格式：{ext}")
-        return
+        return False
     if not lines:
         warn("没提取到对白文本")
-        return
+        return False
 
     if out_dir and single:
         cp = Path(out_dir)
@@ -139,3 +139,5 @@ def clean_subs(
             pp = od / f"{ot.stem}_part{idx}{ot.suffix}"
             with open(pp, 'w', encoding='utf-8') as f:
                 f.write('\n'.join(pl))
+
+    return True

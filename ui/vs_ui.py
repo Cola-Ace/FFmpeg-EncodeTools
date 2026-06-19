@@ -1,11 +1,10 @@
 import datetime
 import json
-import os
 import re
 import sys
-import tempfile
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
@@ -19,11 +18,11 @@ from qfluentwidgets import (
     TitleLabel, InfoBar, InfoBarPosition,
 )
 
-from config import CFG_DIR
+from config import ROOT
 from core.vapoursynth.vs_script import check_vs
 from ui.other.Python_code import CodeBox, CmdHL
 from ui.other.path import DropEdit, PathPick, FilePick, to_one, to_paths
-from utils import load_cfg, save_cfg
+from utils import load_cfg
 
 
 class VSPage(QWidget):
@@ -33,9 +32,14 @@ class VSPage(QWidget):
         super().__init__(parent)
         self.setObjectName("tab_vs_encode")
         self.source_path = ""
-        self.preset_dir = CFG_DIR / "vs_presets"
-        self.script_dir = CFG_DIR / "vs_scripts"
+        self.vpy_dir = ROOT / "vpy"
+        self.vpy_save_dir = self.vpy_dir / "save"
+        self.default_vpy = self.vpy_dir / "default.vpy"
+        self.enc_dir = ROOT / "enc"
+        self.enc_save_dir = self.enc_dir / "save"
+        self.default_enc = self.enc_dir / "default.json"
         self._ui()
+        self._init_dirs()
         self._load_settings()
         self._load_default_script()
 
@@ -222,6 +226,56 @@ class VSPage(QWidget):
         elif self.vid_pick.text().strip():
             self.out_pick.edit.setText(str(Path(self.vid_pick.text().strip()).with_suffix(suffix)))
 
+    def _builtin_script(self) -> str:
+        return (
+            "import vapoursynth as vs\n"
+            "from vapoursynth import core\n"
+            "# Input\n"
+            "src = r\"\"\n"
+            "clip = core.lsmas.LWLibavSource(src)\n"
+            "# Subtitle\n"
+            "ass = r\"\"\n"
+            "font = r\"\"\n"
+            "if ass:\n"
+            "    clip = core.assrender.TextSub(clip, ass, fontdir=font) if font else core.assrender.TextSub(clip, ass)\n"
+            "# Output\n"
+            "clip.set_output(0)\n"
+        )
+
+    def _default_preset(self) -> dict[str, Any]:
+        return {
+            "mode": "x265 CLI",
+            "preset": "slow",
+            "crf": 18.0,
+            "extra_args": "",
+        }
+
+    def _cfg_dir(self, key: str, default: str) -> Path:
+        cfg = load_cfg()
+        p = Path(str(cfg.get(key, default)).strip() or default)
+        if not p.is_absolute():
+            p = ROOT / p
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    def _tmp_path(self, folder: Path, prefix: str, suffix: str) -> Path:
+        folder.mkdir(parents=True, exist_ok=True)
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        return folder / f"{prefix}_{ts}_{uuid4().hex[:8]}{suffix}"
+
+    def _init_dirs(self) -> None:
+        self.vpy_dir.mkdir(parents=True, exist_ok=True)
+        self.vpy_save_dir.mkdir(parents=True, exist_ok=True)
+        self.enc_dir.mkdir(parents=True, exist_ok=True)
+        self.enc_save_dir.mkdir(parents=True, exist_ok=True)
+        self._cfg_dir("temp_vpy_dir", ".\\vpy\\temp")
+        self._cfg_dir("enc_temp_dir", ".\\enc\\temp")
+
+        if not self.default_vpy.exists():
+            self.default_vpy.write_text(self._builtin_script(), encoding="utf-8")
+        if not self.default_enc.exists():
+            self.default_enc.write_text(json.dumps(self._default_preset(), indent=2, ensure_ascii=False), encoding="utf-8")
+
     def _preset_data(self):
         return {
             "mode": self.mode_box.currentText(),
@@ -247,14 +301,14 @@ class VSPage(QWidget):
         if not ok or not name.strip():
             return
         safe = re.sub(r'[\\/:*?"<>|]+', "_", name.strip())
-        self.preset_dir.mkdir(parents=True, exist_ok=True)
-        path = self.preset_dir / f"{safe}.json"
+        self.enc_save_dir.mkdir(parents=True, exist_ok=True)
+        path = self.enc_save_dir / f"{safe}.json"
         path.write_text(json.dumps(self._preset_data(), indent=2, ensure_ascii=False), encoding="utf-8")
         InfoBar.success("保存成功", f"预设已保存：{path.name}", position=InfoBarPosition.TOP, parent=self.window(), duration=5000)
 
     def _load_preset(self):
-        self.preset_dir.mkdir(parents=True, exist_ok=True)
-        path, _ = QFileDialog.getOpenFileName(self, "读取预设", str(self.preset_dir), "JSON (*.json)")
+        self.enc_save_dir.mkdir(parents=True, exist_ok=True)
+        path, _ = QFileDialog.getOpenFileName(self, "读取预设", str(self.enc_save_dir), "JSON (*.json)")
         if not path:
             return
         try:
@@ -265,18 +319,19 @@ class VSPage(QWidget):
             QMessageBox.warning(self, "读取失败", str(exc))
 
     def _save_settings(self):
-        cfg = load_cfg()
-        cfg["vs_mode"] = self.mode_box.currentText()
-        cfg["vs_preset"] = self.pre_box.currentText()
-        cfg["vs_crf"] = self.crf_box.value()
-        cfg["vs_extra_args"] = self.extra_box.toPlainText().strip()
-        cfg["vs_output"] = self.out_pick.text().strip()
-        save_cfg(cfg)
+        self.enc_dir.mkdir(parents=True, exist_ok=True)
+        self.default_enc.write_text(json.dumps(self._preset_data(), indent=2, ensure_ascii=False), encoding="utf-8")
         InfoBar.success("保存成功", "默认参数已保存。", position=InfoBarPosition.TOP, parent=self.window(), duration=5000)
 
     def _load_settings(self):
-        cfg = load_cfg()
-        mode = cfg.get("vs_mode")
+        data = self._default_preset()
+        if self.default_enc.exists():
+            try:
+                data.update(json.loads(self.default_enc.read_text(encoding="utf-8")))
+            except Exception:
+                pass
+
+        mode = data.get("mode")
         if mode:
             if "x264 CLI" in mode or ("x264" in mode and "CLI" in mode):
                 mode = "x264 CLI"
@@ -289,12 +344,11 @@ class VSPage(QWidget):
             idx = self.mode_box.findText(str(mode))
             if idx >= 0:
                 self.mode_box.setCurrentIndex(idx)
-        if cfg.get("vs_preset"):
-            self.pre_box.setCurrentText(str(cfg["vs_preset"]))
-        if "vs_crf" in cfg:
-            self.crf_box.setValue(float(cfg["vs_crf"]))
-        self.extra_box.setPlainText(str(cfg.get("vs_extra_args", "")))
-        self.out_pick.edit.setText(str(cfg.get("vs_output", "")))
+        if data.get("preset"):
+            self.pre_box.setCurrentText(str(data["preset"]))
+        if "crf" in data:
+            self.crf_box.setValue(float(data["crf"]))
+        self.extra_box.setPlainText(str(data.get("extra_args", "")))
         self._sync_output_suffix()
 
 
@@ -303,7 +357,7 @@ class VSPage(QWidget):
 
     def _chk(self):
         code = self.ed.toPlainText()
-        ok, err, full_output = check_vs(code)
+        ok, err, full_output = check_vs(code, self._cfg_dir("temp_vpy_dir", ".\\vpy\\temp"))
         if ok:
             InfoBar.success("语法检查", "脚本语法正确", position=InfoBarPosition.TOP, parent=self.window(), duration=5000)
         else:
@@ -365,19 +419,27 @@ class VSPage(QWidget):
             mode = "ffmpeg"
             enc = "libx265"
 
+        cfg = load_cfg()
         try:
-            tmp = tempfile.NamedTemporaryFile(mode="w", suffix=".vpy", delete=False, encoding="utf-8")
-            tmp.write(code)
-            tmp.close()
+            tmp_vpy = self._tmp_path(self._cfg_dir("temp_vpy_dir", ".\\vpy\\temp"), "vpy", ".vpy")
+            tmp_vpy.write_text(code, encoding="utf-8")
+
+            enc_json = self._tmp_path(self._cfg_dir("enc_temp_dir", ".\\enc\\temp"), "enc", ".json")
+            enc_json.write_text(json.dumps(self._preset_data(), indent=2, ensure_ascii=False), encoding="utf-8")
         except Exception as exc:
-            return None, f"无法写入临时脚本: {exc}"
+            return None, f"无法写入临时文件: {exc}"
 
         return "vs", {
             "_mode": mode,
-            "scr": tmp.name,
+            "scr": str(tmp_vpy),
             "out": str(Path(out).with_suffix(self._target_suffix())),
             "enc": enc,
             "enc_p": enc_params,
+            "tmp_scr": True,
+            "del_tmp": bool(cfg.get("del_temp_vpy", False)),
+            "enc_json": str(enc_json),
+            "tmp_enc": True,
+            "del_tmp_enc": bool(cfg.get("del_temp_enc", False)),
         }
 
     def _update_script_variable(self, var_name, value):
@@ -393,29 +455,15 @@ class VSPage(QWidget):
             self._insert_script_line(f'{var_name} = r"{clean_value}"')
 
     def _load_default_script(self):
-        path = CFG_DIR / "default_script.vpy"
         code = ""
-        if path.exists():
+        if self.default_vpy.exists():
             try:
-                code = path.read_text(encoding="utf-8")
+                code = self.default_vpy.read_text(encoding="utf-8")
             except Exception:
                 pass
 
         if not code:
-            code = (
-                "import vapoursynth as vs\n"
-                "from vapoursynth import core\n"
-                "# Input\n"
-                "src = r\"\"\n"
-                "clip = core.lsmas.LWLibavSource(src)\n"
-                "# Subtitle\n"
-                "ass = r\"\"\n"
-                "font = r\"\"\n"
-                "if ass:\n"
-                "    clip = core.assrender.TextSub(clip, ass, fontdir=font) if font else core.assrender.TextSub(clip, ass)\n"
-                "# Output\n"
-                "clip.set_output(0)\n"
-            )
+            code = self._builtin_script()
         self.ed.setPlainText(code)
         
         if self.vid_pick.text().strip():
@@ -427,17 +475,16 @@ class VSPage(QWidget):
 
     def _save_default_script(self):
         code = self.ed.toPlainText()
-        CFG_DIR.mkdir(parents=True, exist_ok=True)
-        path = CFG_DIR / "default_script.vpy"
+        self.vpy_dir.mkdir(parents=True, exist_ok=True)
         try:
-            path.write_text(code, encoding="utf-8")
+            self.default_vpy.write_text(code, encoding="utf-8")
             InfoBar.success("保存成功", "当前脚本已存为默认启动脚本。", position=InfoBarPosition.TOP, parent=self.window(), duration=5000)
         except Exception as exc:
             QMessageBox.warning(self, "保存失败", str(exc))
 
     def _save_script_to_file(self):
-        self.script_dir.mkdir(parents=True, exist_ok=True)
-        path, _ = QFileDialog.getSaveFileName(self, "保存 VapourSynth 脚本", str(self.script_dir), "VapourSynth Script (*.vpy);;所有文件 (*.*)")
+        self.vpy_save_dir.mkdir(parents=True, exist_ok=True)
+        path, _ = QFileDialog.getSaveFileName(self, "保存 VapourSynth 脚本", str(self.vpy_save_dir), "VapourSynth Script (*.vpy);;所有文件 (*.*)")
         if not path:
             return
         try:
@@ -447,8 +494,8 @@ class VSPage(QWidget):
             QMessageBox.warning(self, "保存失败", str(exc))
 
     def _load_script_from_file(self):
-        self.script_dir.mkdir(parents=True, exist_ok=True)
-        path, _ = QFileDialog.getOpenFileName(self, "加载 VapourSynth 脚本", str(self.script_dir), "VapourSynth Script (*.vpy);;所有文件 (*.*)")
+        self.vpy_save_dir.mkdir(parents=True, exist_ok=True)
+        path, _ = QFileDialog.getOpenFileName(self, "加载 VapourSynth 脚本", str(self.vpy_save_dir), "VapourSynth Script (*.vpy);;所有文件 (*.*)")
         if not path:
             return
         try:

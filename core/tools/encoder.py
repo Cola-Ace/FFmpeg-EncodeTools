@@ -70,7 +70,7 @@ class EncBook:
         """注册一个编码器信息"""
         self._dict[info.name] = info
 
-# 关于内置编码器参数的加载
+### 关于内置编码器参数的加载
 
     def _add_libx264(self) -> None:
         """注册 libx264 编码器参数定义"""

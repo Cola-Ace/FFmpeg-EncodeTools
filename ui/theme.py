@@ -353,7 +353,7 @@ def apply_theme_styles(widget: QWidget) -> None:
 
 
 def polish_theme_widgets(widget: QWidget) -> None:
-    """确保所有 QLabel 子控件背景透明，避免主题切换时出现白底"""
+    """确保所有 QLabel 子控件背景透明"""
     labels: list[QLabel] = []
     if isinstance(widget, QLabel):
         labels.append(widget)
@@ -388,7 +388,7 @@ def dialog_style() -> str:
 
 
 def valid_text_color() -> str:
-    """返回当前主题下"有效"文本的颜色（深色主题白，浅色主题黑）"""
+    """选取当前主题下"有效"文本的颜色"""
     return DARK_TEXT if isDarkTheme() else "#000000"
 
 

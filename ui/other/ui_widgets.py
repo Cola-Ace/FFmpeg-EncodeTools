@@ -6,7 +6,7 @@ from core.tools.encoder import EncParam
 
 
 class WidgetMaker:
-    """根据 EncParam 定义动态创建对应 Qt 控件的工厂类"""
+    """根据 EncParam 定义动态创建对应 Qt 控件"""
 
     @staticmethod
     def make(param: EncParam, ro: bool = False) -> tuple[Any, Callable[[], Any]]:

@@ -2,7 +2,7 @@ import os, re, subprocess, shutil, json, time
 from pathlib import Path
 from typing import Any, Callable
 
-from config import SET_FILE
+from config import ROOT, SET_FILE
 
 
 def warn(msg: str) -> None:
@@ -41,15 +41,15 @@ def load_cfg() -> dict[str, Any]:
         "v_crf": 11.0,
         "a_enabled": False,
         "a_ok": False,
-        "vs_mode": "x265 CLI",
-        "vs_preset": "slow",
-        "vs_crf": 18.0,
-        "vs_extra_args": "",
-        "vs_output": "",
         "a_enc": "aac",
         "adv_ok": False,
         "v_pre": "medium",
-        "a_sr": "保持原始采样率"
+        "a_sr": "保持原始采样率",
+        "if_fail": "继续处理任务并最终反馈错误清单",
+        "temp_vpy_dir": ".\\vpy\\temp",
+        "del_temp_vpy": False,
+        "enc_temp_dir": ".\\enc\\temp",
+        "del_temp_enc": False,
     }
     for k, v in defaults.items():
         if k not in cfg:
@@ -111,7 +111,7 @@ def _resolve_path(path_str: str) -> str | None:
     if not path_str:
         return None
     if path_str.startswith(".\\") or path_str.startswith("./"):
-        p = Path(os.getcwd()) / path_str
+        p = ROOT / path_str
         if p.is_file():
             return str(p.resolve())
     else:
@@ -357,10 +357,26 @@ def run_ff(
 
         proc.wait()
         if worker and worker.is_cancelled:
+            msg = "[取消] 用户取消任务"
+            if log_cb:
+                log_cb(msg, -1)
+            else:
+                print(msg)
             return False
-        return proc.returncode == 0
+        if proc.returncode != 0:
+            msg = f"[错误] {desc} 执行失败，退出码：{proc.returncode}"
+            if log_cb:
+                log_cb(msg, -1)
+            else:
+                warn(msg)
+            return False
+        return True
     except Exception as e:
-        warn(f"FFmpeg 执行崩溃: {e}")
+        msg = f"外部命令执行崩溃: {e}"
+        if log_cb:
+            log_cb(f"[错误] {msg}", -1)
+        else:
+            warn(msg)
         return False
     finally:
         if worker:

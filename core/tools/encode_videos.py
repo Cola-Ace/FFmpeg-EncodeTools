@@ -5,6 +5,14 @@ from utils import uniq_out, run_ff, info, find_exe, get_vinfo
 from core.tools.encoder import EncBook
 
 
+def _add_fail(worker: Any, name: str, error: str) -> None:
+    """记录单项失败信息"""
+    if worker and hasattr(worker, "fails"):
+        worker.fails.append({"name": name, "error": error})
+    if worker:
+        worker.log(f"[错误] {name}: {error}", -1)
+
+
 def _make_vf(
     scale: str | None = None,
     sub_path: str | None = None,
@@ -45,7 +53,7 @@ def encode(
     out_dir: str | None = None,
     worker: Any = None,
     ext_params: dict[str, Any] | None = None,
-) -> None:
+) -> bool:
     """对视频文件执行 FFmpeg 编码压制
 
     Args:
@@ -62,16 +70,19 @@ def encode(
         worker: Runner 实例，用于进度回调与取消
         ext_params: 高级编码参数字典
     """
+    if not vid_list:
+        _add_fail(worker, "视频压制", "没有可处理的视频文件")
+        return False
+
     ff = find_exe("ffmpeg") or "ffmpeg"
     total = len(vid_list)
 
     for idx, vp in enumerate(vid_list):
-        # 检查是否存在文件
-        
         if worker and worker.is_cancelled:
-            break
+            return False
         if not vp.is_file():
-            continue
+            _add_fail(worker, vp.name, "文件不存在或不是有效文件")
+            return False
 
         if out_dir and len(vid_list) == 1:
             op = Path(out_dir)
@@ -123,5 +134,12 @@ def encode(
 
         log_cb = worker.log if worker else None
         status_prefix = f"正在压制 ({idx+1}/{total}): {vp.name}" if total > 1 else f"正在压制: {vp.name}"
-        if run_ff(cmd, f"压制 {vp.name}", dur_ms, worker, log_cb=log_cb, status_prefix=status_prefix):
-            info(f"压制完成 -> {op}")
+        if not run_ff(cmd, f"压制 {vp.name}", dur_ms, worker, log_cb=log_cb, status_prefix=status_prefix):
+            if worker and worker.is_cancelled:
+                return False
+            _add_fail(worker, vp.name, "外部命令执行失败")
+            return False
+
+        info(f"压制完成 -> {op}")
+
+    return True

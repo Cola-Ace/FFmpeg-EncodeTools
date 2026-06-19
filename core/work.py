@@ -12,6 +12,7 @@ from typing import Any
 
 from PySide6.QtCore import QThread, Signal, QObject
 from config import CFG_DIR
+from utils import load_cfg
 
 QUEUE_FILE = CFG_DIR / "task_queue.json"
 
@@ -106,7 +107,6 @@ class RunnerSig(QObject):
 
 class Runner(QThread):
     """任务执行线程
-
     根据 jtype 分发到不同的编码/混流/清洗/章节/VS 函数
     支持暂停、恢复、取消操作
     """
@@ -118,6 +118,9 @@ class Runner(QThread):
         self.sig: RunnerSig = RunnerSig()
         self.paused: bool = False
         self.cancelled: bool = False
+        self.ok: bool = False
+        self.error: str = ""
+        self.fails: list[dict[str, str]] = []
         self.processes: list[subprocess.Popen] = []
 
     @property
@@ -137,7 +140,7 @@ class Runner(QThread):
         return self.cancelled
 
     def pause(self) -> None:
-        """暂停任务（挂起关联的子进程）"""
+        """暂停任务（挂起线程，也就是第一个任务）"""
         self.paused = True
         if os.name == "nt":
             for p in self.processes:
@@ -151,7 +154,7 @@ class Runner(QThread):
                 resume_process(p.pid)
 
     def stop(self) -> None:
-        """取消任务并终止关联子进程"""
+        """取消任务并终止所有子进程"""
         self.cancelled = True
         self.paused = False
         if os.name == "nt":
@@ -170,39 +173,78 @@ class Runner(QThread):
             self.sig.prog.emit(pct, desc)
         self.sig.log.emit(line)
 
+    def _clean_tmp(self) -> None:
+        """按任务参数清理 VS 临时脚本和编码配置"""
+        items = [
+            ("tmp_scr", "del_tmp", "scr", "临时脚本"),
+            ("tmp_enc", "del_tmp_enc", "enc_json", "临时配置文件"),
+        ]
+        for mark_key, del_key, path_key, label in items:
+            if not self.params.get(mark_key) or not self.params.get(del_key):
+                continue
+            path = self.params.get(path_key)
+            if not path:
+                continue
+            try:
+                p = Path(path)
+                if p.exists():
+                    p.unlink()
+                    self.sig.log.emit(f"[清理] 已删除{label}: {p}")
+            except Exception as exc:
+                self.sig.log.emit(f"[清理失败] {label}: {exc}")
+
+    def _fail_msg(self, fallback: str = "任务执行失败") -> str:
+        """生成简洁的失败信息"""
+        if self.fails:
+            lines = ["任务执行失败，详情如下："]
+            for i, item in enumerate(self.fails, 1):
+                name = item.get("name", "未知项目")
+                err = item.get("error", fallback)
+                lines.append(f"{i}. {name}：{err}")
+            return "\n".join(lines)
+        return fallback
+
     def run(self) -> None:
-        """线程运行入口：按 jtype 分发到对应的工具函数"""
+        """按 jtype 分发到对应的工具函数"""
         if self.jtype in ["encode", "mux", "mux_ff", "fast_mux", "chapter", "vs"]:
             self.params['worker'] = self
 
         try:
+            ok = False
             if self.jtype == "encode":
                 from core.tools.encode_videos import encode
-                encode(**self.params)
+                ok = encode(**self.params)
             elif self.jtype == "clean":
                 from core.tools.subs_clean import clean_subs
                 single = len(self.params['vid_list']) == 1
                 total = len(self.params['vid_list'])
+                ok = True
                 for idx, p in enumerate(self.params['vid_list']):
                     if self.cancelled:
+                        ok = False
                         break
                     pct = int((idx / total) * 100)
                     self.log(f"正在清洗字幕 ({idx+1}/{total}): {p.name}", pct)
-                    clean_subs(p, self.params['mode'], self.params['split_n'],
-                               self.params['out_dir'], single)
-                self.log("所有字幕清洗完成", 100)
+                    item_ok = clean_subs(p, self.params['mode'], self.params['split_n'],
+                                         self.params['out_dir'], single)
+                    if not item_ok:
+                        self.fails.append({"name": p.name, "error": "字幕清洗失败"})
+                        ok = False
+                        break
+                if ok:
+                    self.log("所有字幕清洗完成", 100)
             elif self.jtype == "mux":
                 from core.tools.muxer import mux
-                mux(**self.params)
+                ok = mux(**self.params)
             elif self.jtype == "fast_mux":
                 from core.tools.muxer import mux
-                mux(**self.params)
+                ok = mux(**self.params)
             elif self.jtype == "mux_ff":
                 from core.tools.muxer import mux_ff
-                mux_ff(**self.params)
+                ok = mux_ff(**self.params)
             elif self.jtype == "chapter":
                 from core.tools.chaper_into import inject_chap
-                inject_chap(**self.params)
+                ok = inject_chap(**self.params)
             elif self.jtype == "vs":
                 from core.vapoursynth.vs_pipe import run_vs_cli, run_vs_ff
                 scr = self.params["scr"]
@@ -215,12 +257,27 @@ class Runner(QThread):
                 else:
                     ok = run_vs_cli(scr, out, enc, enc_p, self)
                 if not ok:
-                    raise Exception("VapourSynth压制管道执行失败")
+                    self.fails.append({"name": Path(scr).name, "error": "VapourSynth压制执行失败"})
+            else:
+                self.error = f"未知任务类型：{self.jtype}"
 
-            self.sig.log.emit("\n>>> 任务完成 <<<")
+            if self.cancelled:
+                self.error = "任务已取消"
+                self.sig.log.emit("\n>>> 任务已取消 <<<")
+            elif ok:
+                self.ok = True
+                self.sig.log.emit("\n>>> 任务完成 <<<")
+            else:
+                self.error = self._fail_msg(self.error or "任务执行失败")
+                self.sig.log.emit("\n>>> 任务失败 <<<")
+                self.sig.err.emit(self.error)
+
         except Exception as e:
-            self.sig.err.emit(str(e))
+            self.error = str(e)
+            self.sig.log.emit("\n>>> 任务失败 <<<")
+            self.sig.err.emit(self.error)
         finally:
+            self._clean_tmp()
             self.sig.done.emit()
 
 
@@ -232,6 +289,7 @@ class QSig(QObject):
     log = Signal(str, str)
     ended = Signal(str, bool)
     changed = Signal()
+    fail = Signal(str)
     all_done = Signal()
 
 
@@ -244,6 +302,8 @@ class JobQ:
         self.max_run: int = max_run
         self._running: dict[str, Runner] = {}
         self._enabled: bool = False
+        self.fails: list[dict[str, str]] = []
+        self._reported: bool = False
         self.sig: QSig = QSig()
 
     def add(self, job: Job) -> None:
@@ -255,7 +315,7 @@ class JobQ:
         self._save()
 
     def remove(self, jid: str) -> bool:
-        """从队列中移除指定任务正在运行的任务会被取消"""
+        """从队列中移除指定任务，正在运行的任务会被取消"""
         stop_w = None
         changed = False
         with self._lk:
@@ -333,7 +393,7 @@ class JobQ:
             self._save()
 
     def _go(self, job: Job) -> None:
-        """启动一个任务的 Runner 线程并连接信号"""
+        """启动一个任务线程并连接信号"""
         r = Runner(job.jtype, dict(job.params))
         self._running[job.id] = r
 
@@ -347,13 +407,13 @@ class JobQ:
 
         def on_done(jid=job.id):
             w = self._running.pop(jid, None)
-            ok = bool(w and not getattr(w, "cancelled", False) and not getattr(w, "_err", False))
-            self._finish(jid, ok)
+            ok = bool(w and w.ok and not w.cancelled)
+            cancelled = bool(w and w.cancelled)
+            if w and w.error:
+                job.err = w.error
+            self._finish(jid, ok, cancelled)
 
         def on_err(err, jid=job.id):
-            w = self._running.get(jid)
-            if w:
-                setattr(w, "_err", True)
             job.err = err
             self.sig.log.emit(jid, f"[错误] {err}")
 
@@ -366,27 +426,81 @@ class JobQ:
         self.sig.started.emit(job.id)
         self.sig.changed.emit()
 
-    def _finish(self, jid: str, ok: bool) -> None:
-        """标记任务完成并触发下一个"""
+    def _fail_msg(self) -> str:
+        """生成队列失败清单。"""
+        lines = ["任务队列执行结束，失败清单："]
+        for i, item in enumerate(self.fails, 1):
+            kind = item.get("type", "任务")
+            name = item.get("name", "未命名任务")
+            err = item.get("error", "执行失败")
+            lines.append(f"{i}. [{kind}] {name}：{err}")
+        return "\n".join(lines)
+
+    def _stop_wait(self) -> None:
+        """中止队列时，将未开始任务标记为取消"""
+        for t in self._q:
+            if t.state == JobState.WAIT:
+                t.state = JobState.STOP
+                t.err = "队列已因任务失败而中止"
+                t.done_at = datetime.now().isoformat()
+
+    def _check_end(self) -> None:
+        """队列结束时发出成功或失败信号"""
+        with self._lk:
+            done = len(self._running) == 0 and not any(t.state == JobState.WAIT for t in self._q)
+            if not done or self._reported:
+                return
+            self._reported = True
+            failed = bool(self.fails)
+            stopped = any(t.state == JobState.STOP for t in self._q)
+            text = self._fail_msg() if failed else "任务队列已取消。"
+            self._enabled = False
+
+        if failed:
+            self.sig.fail.emit(text)
+        elif stopped:
+            self.sig.fail.emit(text)
+        else:
+            self.sig.all_done.emit()
+
+    def _finish(self, jid: str, ok: bool, cancelled: bool = False) -> None:
+        """标记任务完成并按队列策略触发后续任务
+        如果任务失败则根据预设逻辑执行
+        """
+        abort = False
         with self._lk:
             for t in self._q:
                 if t.id == jid:
-                    t.state = JobState.DONE if ok else JobState.FAIL
+                    if ok:
+                        t.state = JobState.DONE
+                    elif cancelled:
+                        t.state = JobState.STOP
+                    else:
+                        t.state = JobState.FAIL
+                        self.fails.append({
+                            "type": Job.type_name(t.jtype),
+                            "name": t.name or t.jtype,
+                            "error": t.err or "任务执行失败",
+                        })
                     t.done_at = datetime.now().isoformat()
                     break
+            if not ok and not cancelled:
+                if load_cfg().get("if_fail", "继续处理任务并最终反馈错误清单") == "立刻终止任务":
+                    self._enabled = False
+                    abort = True
+                    self._stop_wait()
         self.sig.ended.emit(jid, ok)
         self.sig.changed.emit()
         self._save()
-        self._next()
+        if not abort and self._enabled:
+            self._next()
 
-        with self._lk:
-            is_all_finished = len(self._running) == 0 and not any(t.state == JobState.WAIT for t in self._q)
-        if is_all_finished and self._enabled:
-            self._enabled = False
-            self.sig.all_done.emit()
+        self._check_end()
 
     def start_queue(self) -> None:
         """启动队列调度"""
+        self.fails = []
+        self._reported = False
         self._enabled = True
         self._next()
 
@@ -423,7 +537,9 @@ class JobQ:
 
 
     def _save(self) -> None:
-        """将未完成任务持久化到 JSON 文件"""
+        """将未完成任务转移到 JSON 文件
+        避免程序异常崩溃
+        """
         try:
             items = [t.to_dict() for t in self._q
                      if t.state in (JobState.WAIT, JobState.PAUSE)]
@@ -434,7 +550,7 @@ class JobQ:
 
 
 def load_q() -> list[Job]:
-    """从持久化文件恢复未完成的任务列表"""
+    """从 JSON 文件恢复未完成的任务列表"""
     if not QUEUE_FILE.exists():
         return []
     try:
@@ -442,6 +558,3 @@ def load_q() -> list[Job]:
         return [Job.from_dict(d) for d in data]
     except Exception:
         return []
-
-
-

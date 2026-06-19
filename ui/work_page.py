@@ -1,6 +1,6 @@
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QFont
-from PySide6.QtWidgets import QHBoxLayout, QScrollArea, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QMessageBox, QHBoxLayout, QScrollArea, QVBoxLayout, QWidget
 from qfluentwidgets import (
     BodyLabel, CardWidget, FluentIcon, InfoBar, InfoBarPosition,
     PrimaryPushButton, ProgressBar, PushButton, SpinBox, StrongBodyLabel,
@@ -186,6 +186,7 @@ class QueuePage(QWidget):
         self.q.sig.prog.connect(self._prog)
         self.q.sig.ended.connect(self._ended)
         self.q.sig.changed.connect(self._refresh)
+        self.q.sig.fail.connect(self._failed)
 
     def _added(self, jid):
         job = self.q.get(jid)
@@ -213,7 +214,14 @@ class QueuePage(QWidget):
     def _ended(self, jid, ok):
         card = self._cards.get(jid)
         if card:
-            card.refresh(JobState.DONE if ok else JobState.FAIL)
+            job = self.q.get(jid)
+            if job:
+                card.refresh(job.state, job.pct)
+            else:
+                card.refresh(JobState.DONE if ok else JobState.FAIL)
+
+    def _failed(self, text):
+        QMessageBox.warning(self.window(), "任务队列未完成", text)
 
     def _refresh(self):
         jobs = self.q.all()
